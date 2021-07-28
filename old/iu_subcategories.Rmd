@@ -1,0 +1,58 @@
+---
+title: "Dealing with subcategories"
+author: "Iñaki Úcar"
+output:
+  html_document:
+    df_print: paged
+    number_sections: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+```{r}
+source("iu_clean.R")
+```
+
+Approach alternativo para obtener subcategorías _razonables_ (i.e., no demasiado generales, no demasiado particulares):
+
+1. Creo un ranking de subcategorías contando cuántas veces aparecen en distintos papers. Las subcategorías que aparezcan en más papers serán más generales.
+
+```{r}
+socarxiv <- articles[repository == "socarxiv"]
+socarxiv.v <- socarxiv[, .(weight=.N), by=subcategory][order(weight, decreasing=TRUE)]
+socarxiv.v
+```
+
+2. Utilizo ese ranking para quedarme solo con la subcategoría más general de cada paper, y con esto veo cuántas subcategorías me quedan.
+
+```{r}
+get_main <- function(data, del, all) {
+  data[!subcategory %in% del][
+    , .(main = all[all %in% subcategory][1]), by=id][
+      , .N, by=main][order(N, decreasing=TRUE)]
+}
+
+get_main(socarxiv, NULL, socarxiv.v$subcategory)
+```
+
+Dividiríamos todos los papers en solo `r nrow(.Last.value)` subcategorías. En total, socarxiv tiene `r length(unique(socarxiv$id))` papers. Por tanto, está claro que "Social and Behavioural Sciences" es demasiado general. Si la borramos y repetimos el proceso, obtenemos:
+
+```{r}
+del <- "Social and Behavioral Sciences"
+get_main(socarxiv, del, socarxiv.v$subcategory)
+```
+
+Ahora `r nrow(.Last.value)` subcategorías parece mucho más razonable. Nos podemos quedar aquí o podemos seguir un poco más. Podemos partir "Sociology" y "Art and Humanities". Además, dado que tenemos "Economics" y "Psychology" en otros repositorios, podemos partirlas también para ver qué nuevas subcategorías aparecen. A continuación se pintan las nuevas subcategorías que aparecen a cada paso:
+
+```{r}
+last <- get_main(socarxiv, del, socarxiv.v$subcategory)$main
+del <- c("Social and Behavioral Sciences", "Sociology", "Arts and Humanities", "Psychology", "Economics")
+for (i in seq_along(del)[-1]) {
+  sel <- get_main(socarxiv, del[1:i], socarxiv.v$subcategory)
+  cat("Al eliminar", del[i], "aparece:\n")
+  print(setdiff(sel$main, last)); cat("\n")
+  last <- sel$main
+}
+```

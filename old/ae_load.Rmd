@@ -1,0 +1,97 @@
+---
+title: 'COVID dataset: load the data'
+author: "Antonio Elías"
+date: "06/07/2020"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Install and load the library RSQLite
+
+```{r}
+#install.packages("RSQLite")
+library(RSQLite)
+```
+
+
+# 2. Load the data set
+
+## 2.1 Create connection to the db
+```{r}
+conn_table_CONCIERGE <- dbConnect(RSQLite::SQLite(), "database/dataRxiv.db")
+```
+
+## 2.2 See list of tables
+```{r}
+dbListTables(conn_table_CONCIERGE)
+```
+
+We have four tables ARTICLES, AUTHORS, CATEGORIES AND TEXT.
+
+## 2.3 Get the tables as data.frames
+
+Table ARTICLES includes:
+
+  - **id**: article identifier.
+  - **repository**: repository name.
+  - **date**: first date of publication (YEAR-MONTH-DAY).
+
+```{r}
+articles <- dbGetQuery(conn_table_CONCIERGE, "SELECT * FROM ARTICLES")
+head(articles)
+```
+
+Table AUTHORS includes:
+
+  - **id**: article identifier.
+  - **full_name**: full name.
+  - **given_name**: first word that appears at full_name.
+  - **alphabetical_ordered**: if the full names of the article are alphabetically ordered (TRUE) or (FALSE).
+  - **position**: author position 1, 2, 3...
+  - **rank**: first authors, middle author, last author or single author.
+  - **name**: named used for "genderizing" the author.
+  - **gender**: predicted gender (male or female).
+  - **probability**: number of times that the number appears as gender X divided by the number of times the name appears in the genderize data set.
+  - **count**: number of times that the name appears in the genderize data set.
+
+```{r}
+authors <- dbGetQuery(conn_table_CONCIERGE, "SELECT * FROM AUTHORS")
+head(authors)
+```
+
+Table CATEGORIES includes:
+
+  - **id**: article identifier.
+  - **category**: first level of category (arxiv).
+  - **subcategory_code**: code given in arxiv.
+  - **subcategory_name**: same as code for arxiv (but understandable). For the other repositories this is the subject.
+  - **primary**: if it is the primary category (for arxiv takes 0 and 1) for other repositories is always 1.
+
+```{r}
+categories <- dbGetQuery(conn_table_CONCIERGE, "SELECT * FROM CATEGORIES")
+head(categories)
+```
+
+Table TEXT includes:
+
+  - **id**: article identifier.
+  - **title**: article title.
+  - **abstract**: article abstract.
+
+```{r}
+text <- dbGetQuery(conn_table_CONCIERGE, "SELECT * FROM TEXT")
+head(text)
+```
+
+Changes in articles, authors, categories or text do not modify the main dataRxiv.db.
+
+## 2.4 Disconnect to the database
+Disconnect the database.
+
+```{r}
+dbDisconnect(conn_table_CONCIERGE)
+```

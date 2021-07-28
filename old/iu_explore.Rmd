@@ -1,0 +1,351 @@
+---
+title: "Explorando modelicos"
+author: "Iñaki Úcar"
+output:
+  html_document:
+    df_print: paged
+    number_sections: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+# Procesado
+
+## Agregado y limpieza
+
+```{r}
+library(data.table)
+library(lme4)
+library(ggplot2)
+
+# pseudo r-squared que vale para todo
+r.squared <- function(m) {
+  lmfit <-  lm(model.response(model.frame(m)) ~ fitted(m))
+  summary(lmfit)$r.squared
+}
+
+# unas medidas performance y goodness
+model_performance <- function(m) {
+  # obs. vs fitted
+  df <- data.frame(fitted=fitted(m), response=model.response(model.frame(m)))
+  print(ggplot(df) + aes(fitted, response) +
+          geom_point() + geom_abline() + geom_smooth(method="lm"))
+  # pseudo r-squared
+  cat("pseudo-R2 =", r.squared(m))
+}
+model_assumptions <- function(m) {
+  # residuals vs fitted
+  df <- data.frame(fitted=fitted(m), residuals=residuals(m))
+  print(ggplot(df) + aes(fitted, residuals) +
+          geom_point() + geom_abline(slope=0) + geom_smooth(method="lm"))
+  # residuals
+  qqnorm(residuals(m))
+  qqline(residuals(m))
+}
+
+source("exploratory/iu_features.R")
+
+# quito socarxiv y psyarxiv de momento
+# df <- df[!repository %in% c("socarxiv", "psyarxiv")]
+# quito papers donde el número de missing sea de más del 25% de los autores
+df <- df[n_na < 0.25 * (n_na + n_male + n_female)]
+
+# dissimilarity index (no lo uso aún)
+df.diss <- df[, .(
+  diss = 0.5*sum(abs(n_male/sum(n_male) - n_female/sum(n_female)))
+), by=.(repository, category, subcategory)]
+
+# agregados por subcategoría, mes y covid
+df.agg <- df[, .(
+  r_male = sum(n_male) / sum(n_male + n_female),
+  n_male = sum(n_male),
+  n_female = sum(n_female),
+  total = sum(n_male) + sum(n_female)
+), by=.(repository, category, subcategory, covid, year, month)]
+df.agg <- merge(df.agg, df.diss)
+
+# quito observaciones con menos de 30 personas (en un mes)
+df.agg <- df.agg[total > 30]
+# covid era en realidad covidpaper
+df.agg[, covidpaper := covid]
+# llamamos (periodo) covid a febrero-mayo 2020
+df.agg[, covid := year == 2020 & month > 2]
+# me llevo la referencia de año y mes a 0
+df.agg[, year := year - min(year)]
+df.agg[, month := year*12 + month - 1]
+```
+
+## Un vistazo rápido
+
+En volumen, se crece un montón en número de autores:
+
+```{r}
+ggplot(df.agg) + aes(month, total, fill=covidpaper) + geom_col()
+```
+
+Crecimiento por categorías:
+
+```{r}
+ggplot(df.agg[, .(total=sum(total)), by=.(month, category)]) +
+  aes(month, total, color=category) + geom_line()
+```
+
+Esta es la distribución de la proporción de hombres, que parece bimodal (recordemos esto):
+
+```{r}
+ggplot(df.agg) + aes(r_male, fill=covidpaper) + geom_histogram() + facet_grid(~covid)
+```
+
+Y parece que, _overall_, decrece la proporción de hombres:
+
+```{r}
+ggplot(df.agg) + aes(month, r_male) + geom_boxplot(aes(group=month)) +
+  geom_smooth(method="lm")
+```
+
+Efectos de `covid` y `covidpaper` para el año 2020:
+
+```{r}
+ggplot(df.agg[year == 3]) + aes(interaction(covid, covidpaper), r_male) +
+  geom_boxplot()
+```
+
+Efectos de `covid` y `covidpaper` para el año 2020 para las subcategorías que tienen papers COVID:
+
+```{r, fig.asp=4}
+subcat_with_covidpaper <- unique(df.agg[covidpaper == TRUE]$subcategory)
+ggplot(df.agg[subcategory %in% subcat_with_covidpaper]) +
+  aes(interaction(covid, covidpaper), r_male) +
+  geom_boxplot() + facet_grid(category~.)
+```
+
+# Modelos
+
+La idea general es modelar el porcentaje de hombres en función de:
+
+- Tiempo, mes o año, da un poco lo mismo (sale consistentemente lo mismo).
+- Periodo de pandemia o no (variable `covid`).
+- Paper sobre COVID-19 o no (variable `covidpaper`).
+- Categoría o subcategoría.
+
+Importante: usamos el número de autores (variable `total`) como pesos.
+
+## Viva Gauss y la interpretabilidad
+
+Empezamos por lo simple.
+
+### lm
+
+Primero vamos a ver qué podemos hacer con las categorías, que es lo más grueso:
+
+```{r}
+fit_lm <- lm(
+  r_male ~ month + covid + covidpaper + category,
+  df.agg, weights=total)
+```
+
+Vamos a ver qué pinta tiene:
+
+```{r}
+model_performance(fit_lm)
+```
+
+Not bad, not good. Hay como dos clusters (¿recordáis la bimodal de arriba?, ¿puede ser eso?; en cualquier caso, está claro que las categorías no lo capturan).
+
+```{r}
+model_assumptions(fit_lm)
+```
+
+Los he visto peores, pero podemos hacerlo mejor. Y finalmente:
+
+```{r}
+summary(fit_lm)
+```
+
+Coge 0.68 como intercept, lo que es raro raro (la media en 2017 es más alta, de alrededor de 0.82), y los efectos de `covid` y `covidpaper` son positivos (aumentan). Lo bueno es que hay muchas estrellicas. :)
+
+Vamos a añadir las subcategorías:
+
+```{r}
+fit_lm2 <- lm(
+  r_male ~ month + covid + covidpaper + subcategory,
+  df.agg, weights=total)
+```
+
+A ver:
+
+```{r}
+model_performance(fit_lm2)
+```
+
+Muuucho mejor. Está claro que las categorías son demasiado gruesas. Y los residuales:
+
+```{r}
+model_assumptions(fit_lm2)
+```
+
+No están mal, pero se pueden mejorar. Finalmente:
+
+```{r}
+summary(fit_lm2)
+```
+
+El intercept está mucho mejor (0.85), y `covid` y `covidpaper` siguen saliendo positivos.
+
+### lmer
+
+Vamos directamente con las subcategorías a partir de ahora.
+
+```{r}
+fit_lmer <- lmer(
+  r_male ~ month + covid + covidpaper + (1 | category/subcategory),
+  df.agg, weights=total)
+```
+
+Ojo a esto:
+
+```{r}
+model_performance(fit_lmer)
+```
+
+Nice! Y los residuales:
+
+```{r}
+model_assumptions(fit_lmer)
+```
+
+Pues siguen desviándose de la normal en las colas. Esto realmente es esperable, porque estamos con una proporción.
+
+```{r}
+summary(fit_lmer)
+```
+
+Intecept de 0.80, que está muy bien. Variables `covid` y `covidpaper` positivas (spoiler: salen siempre positivas). Lo bueno del modelo de efectos mixtos es que le cambias subcategorías por categoría y, aunque sale peor, como el modelo lineal, el intercept es estable, sale lo mismo.
+
+## Binomial, un poco odd
+
+Dado que la variable respuesta va de 0 a 1 de forma continua, lo suyo es un modelo binomial fraccional (binomial más los pesos de los _counts_).
+
+### glm
+
+Primero lo primero:
+
+```{r}
+fit_glm <- glm(
+  r_male ~ month + covid + covidpaper + subcategory,
+  df.agg, family=binomial, weights=total)
+```
+
+Que nos da:
+
+```{r}
+model_performance(fit_glm)
+```
+
+Muy bien, similar a lo anterior, pero ahora:
+
+```{r}
+model_assumptions(fit_glm)
+```
+
+Espectaculares residuales. No habéis visto unos residuales así ni en los ejercicios de clase. Finalmente, el chorizo:
+
+```{r}
+summary(fit_glm)
+```
+
+Ojo que ahora esto son odds ratio! Podemos transformar el intercept a la unidad original:
+
+```{r}
+exp(coef(fit_glm)[1]) / (exp(coef(fit_glm)[1]) + 1)
+```
+
+No está mal. Quizás un poco alto. Y los efectos:
+
+```{r, fig.asp=4}
+sjPlot::plot_model(fit_glm)
+```
+
+### glmer
+
+Y ya todo junto: binomial fraccional de efectos mixtos. Hay que escalar el mes o si no se queja (también se puede cambiar por el año, no hay mucha diferencia):
+
+```{r}
+fit_glmer <- glmer(
+  r_male ~ scale(month, FALSE) + covid + covidpaper + (1 | category/subcategory),
+  df.agg, family=binomial, weights=total)
+```
+
+Tenemos:
+
+```{r}
+model_performance(fit_glmer)
+```
+
+Similar, y:
+
+```{r}
+model_assumptions(fit_glmer)
+```
+
+Similar. Finalmente:
+
+```{r}
+summary(fit_glmer)
+```
+
+Esta es la estimación del intercept más ajustada hasta ahora:
+
+```{r}
+exp(fixef(fit_glmer)[1]) / (exp(fixef(fit_glmer)[1]) + 1)
+```
+
+Nice! Efectos fijos:
+
+```{r}
+sjPlot::plot_model(fit_glmer) + ylim(0.7, 1.3)
+```
+
+Y siguen saliendo positivos. Lo que me escama es que se ve una bajada en las gráficas de arriba. La media de la proporción de hombres para 2020 es más baja, pero las variables COVID salen siempre positivas (!). ¿Por qué?
+
+Efectos aleatorios:
+
+```{r}
+sjPlot::plot_model(fit_glmer, "re")[[2]]
+```
+
+```{r, fig.asp=4}
+sjPlot::plot_model(fit_glmer, "re")[[1]]
+```
+
+## Postre
+
+¿Qué pasa si usamos categorías (demasiado gruesas) más otra variable predictiva (la que nos hemos dejado todo este rato)?
+
+```{r}
+fit_glmer2 <- glmer(
+  r_male ~ scale(month, FALSE) + covid + covidpaper + diss + (1 | category),
+  df.agg, family=binomial, weights=total)
+```
+
+Esto es interesante:
+
+```{r}
+model_performance(fit_glmer2)
+```
+
+Siguen saliendo dos modos, dos clusters, pero se explica bastante más variabilidad.
+
+```{r}
+model_assumptions(fit_glmer2)
+```
+
+Los residuales siguen siendo fetén, porque el problema es el tipo de modelo (binomial fraccional vs. gaussiano). ¿Adivináis qué pasa con los coeficientes COVID?
+
+```{r}
+summary(fit_glmer2)
+```
+
+Siguen saliendo positivos. Lo que pasa ahora es que el índice de disimilaridad se ha llevado medio intercept (!).
