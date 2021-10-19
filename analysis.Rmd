@@ -287,10 +287,86 @@ articles %>%
   na.omit()
 ```
 
-### Preprints considered per year and model
+## Preprints considered per year and model
+
+### All authors
 
 ```{r}
+pp.all <- articles %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  group_by(id) %>%
+  summarise(n_male = sum(gender == "male", na.rm=TRUE),
+            n_female = sum(gender == "female", na.rm=TRUE),
+            n_na = sum(is.na(gender)),
+            total = n_male + n_female, .groups="drop") %>%
+  merge_info() %>%
+  # remove papers with more than 25% of authors with missing gender
+  filter(n_na < 0.25 * (n_na + n_male + n_female)) %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.all$n)
+```
 
+### First authors
+
+```{r}
+pp.first <- authors %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.first$n)
+```
+
+### Last authors
+
+```{r}
+pp.last <- authors %>%
+  filter(!alphabetical_ordered & rank == "last") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "last") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.last$n)
+```
+
+### Single authors
+
+```{r}
+pp.single <- authors %>%
+  filter(rank == "single") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(rank == "single") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.single$n)
 ```
 
 ## Evolution per category over time
