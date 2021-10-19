@@ -195,50 +195,116 @@ df.all <- df.id %>%
   group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
   summarise(p_male = sum(n_male) / sum(total),
             total = sum(total), .groups="drop")
-  
-# features first
-df.first <- authors %>%
-  filter(probability >= 0.95 & count >= 10) %>%
-  filter(!alphabetical_ordered & rank == "first") %>%
-  merge_info() %>%
+
+summarise_solo <- function(.data) .data %>%
   group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
   summarise(n_male = sum(gender == "male", na.rm=TRUE),
             n_female = sum(gender == "female", na.rm=TRUE),
             total = n_male + n_female,
             p_male = n_male / total, .groups="drop")
+
+# features first
+df.first <- authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  summarise_solo()
 
 # features last
 df.last <- authors %>%
   filter(probability >= 0.95 & count >= 10) %>%
   filter(!alphabetical_ordered & rank == "last") %>%
   merge_info() %>%
-  group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
-  summarise(n_male = sum(gender == "male", na.rm=TRUE),
-            n_female = sum(gender == "female", na.rm=TRUE),
-            total = n_male + n_female,
-            p_male = n_male / total, .groups="drop")
+  summarise_solo()
 
 # features single
 df.single <- authors %>%
   filter(probability >= 0.95 & count >= 10) %>%
   filter(rank == "single") %>%
   merge_info() %>%
-  group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
-  summarise(n_male = sum(gender == "male", na.rm=TRUE),
-            n_female = sum(gender == "female", na.rm=TRUE),
-            total = n_male + n_female,
-            p_male = n_male / total, .groups="drop")
+  summarise_solo()
 ```
 
 # Descriptive
 
-## Number of papers per month
+## Data after pre-processing
+
+### Number of unique papers
+
+```{r}
+articles %>%
+  select(id) %>%
+  distinct() %>%
+  count()
+```
+
+### Number of subcategories per category
+
+```{r}
+articles %>%
+  select(category, subcategory) %>%
+  distinct() %>%
+  count(category)
+```
+
+### Number of papers per category
+
+```{r}
+articles %>%
+  select(category, id) %>%
+  distinct() %>%
+  count(category)
+```
+
+## Analysis of missings
+
+### Missing authors
+
+```{r}
+authors %>%
+  select(-id) %>%
+  distinct() %>%
+  summarise(
+    missing = sum(is.na(probability)) / n(),
+    discarded = sum(!is.na(probability) & (probability<0.95 | count<10)) / n(),
+    total = n()
+  )
+```
+
+### Missing authors per year
+
+```{r}
+articles %>%
+  select(id, year) %>%
+  distinct() %>%
+  right_join(authors) %>%
+  group_by(year) %>%
+  summarise(
+    missing = sum(is.na(probability)) / n(),
+    discarded = sum(!is.na(probability) & (probability<0.95 | count<10)) / n(),
+    total = n()
+  ) %>%
+  na.omit()
+```
+
+### Preprints considered per year and model
+
+```{r}
+
+```
+
+## Evolution per category over time
+
+### Number of papers per month
 
 ```{r}
 library(ggplot2)
 theme_set(theme_bw())
 
-df.plot.papers <- count(df.id, yearmon, category)
+df.plot.papers <- df.id %>%
+  select(yearmon, category, id) %>%
+  distinct() %>%
+  count(yearmon, category)
 df.plot.papers.all <- df.plot.papers %>%
   group_by(yearmon) %>%
   summarise(n = sum(n), .groups="drop") %>%
@@ -253,10 +319,12 @@ ggplot(df.plot.papers) +
   labs(y="Number of papers per month", x=NULL)
 ```
 
-## Number of authors per month
+### Number of authors per month
 
 ```{r}
 df.plot.authors <- df.id %>%
+  select(yearmon, category, id, total) %>%
+  distinct() %>%
   group_by(yearmon, category) %>%
   summarise(n = sum(total), .groups="drop")
 df.plot.authors.all <- df.plot.authors %>%
@@ -273,10 +341,12 @@ ggplot(df.plot.authors) +
   labs(y="Number of authors per month", x=NULL)
 ```
 
-## Proportion of males per month
+### Proportion of males per month
 
 ```{r}
 df.plot.p_male <- df.id %>%
+  select(yearmon, category, id, n_male, total) %>%
+  distinct() %>%
   group_by(yearmon, category) %>%
   summarise(p_male = sum(n_male) / sum(total), .groups="drop")
 df.plot.p_male.all <- df.id %>%
