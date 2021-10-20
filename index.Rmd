@@ -1,0 +1,547 @@
+---
+title: "Mind the gender gap: COVID-19 lockdown effects on gender differences in research"
+author: "Iñaki Úcar, Margarita Torre, Antonio Elías"
+output:
+  html_document:
+    df_print: paged
+    number_sections: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+<details>
+<summary>Functions</summary>
+```{r}
+get_file <- function(x) {
+  dir.create("data", showWarnings=FALSE)
+  file <- file.path("data", x)
+  if (!file.exists(file)) download.file(
+    paste0("https://zenodo.org/record/5142676/files/", x, "?download=1"), file)
+  file
+}
+
+mutate_cond <- function(.data, condition, ..., envir = parent.frame()) {
+  require(dplyr)
+  
+  condition <- eval(substitute(condition), .data, envir)
+  .data[condition, ] <- mutate(.data[condition, ], ...)
+  .data
+}
+
+get_main <- function(repo, data, n=100) {
+  require(dplyr)
+  
+  subcat <- data %>%
+    filter(repository %in% repo) %>%
+    group_by(subcategory) %>%
+    summarise(weight = n(), .groups="drop") %>%
+    arrange(desc(weight)) %>%
+    pull(subcategory)
+  
+  data %>%
+    filter(repository %in% repo) %>%
+    group_by(id) %>%
+    summarise(main = subcat[subcat %in% subcategory][1], .groups="drop") %>%
+    group_by(main) %>%
+    summarise(N = n(), .groups="drop") %>%
+    arrange(desc(N)) %>%
+    filter(N >= n) %>%
+    pull(main)
+}
+
+# performance
+model_performance <- function(m) {
+  require(ggplot2)
+  
+  # obs. vs fitted
+  df <- data.frame(fitted=fitted(m), response=model.response(model.frame(m)))
+  ggplot(df) + aes(fitted, response) +
+    geom_point(alpha=0.3) + geom_abline() + geom_smooth(method="lm") +
+    ggpmisc::stat_poly_eq(formula=y~x, parse=TRUE)
+}
+```
+</details>
+
+# Data preparation
+
+## Cleaning and filtering
+
+```{r, message=FALSE}
+library(dplyr)
+
+articles <- readr::read_csv(get_file("categories.csv")) %>%
+  left_join(readr::read_csv(get_file("articles.csv")), by="id") %>%
+  rename(subcategory = subcategory_name) %>%
+  select(id, repository, category, subcategory, date) %>%
+  distinct() %>%
+  collect() %>%
+  
+  # define main categories for repo != arXiv
+  mutate_cond(subcategory %in% c("Epidemiology", "Clinical Trials"), repository = "medrxiv") %>%
+  mutate_cond(repository == "medrxiv", category = "Health Sciences") %>%
+  mutate_cond(repository == "biorxiv", category = "Biology") %>%
+  mutate_cond(repository == "psyarxiv", category = "Psychology") %>%
+  mutate_cond(repository == "socarxiv", category = "Social Sciences")
+
+articles %>%
+  group_by(repository, category) %>%
+  summarise(subcategories=length(unique(subcategory)), n=n())
+```
+
+```{r, message=FALSE}
+articles <- articles %>%
+  # mark lockdown period & move time reference to 0
+  mutate(year = lubridate::year(date), month = lubridate::month(date)) %>%
+  mutate(lockdown = year == 2020 & month > 2) %>%
+  mutate(yearmon = (year - min(year)) + (month - 1) / 12) %>%
+
+  # adjustments to Biology and Economics
+  mutate_cond(category == "Quantitative Biology", category = "Biology") %>%
+  mutate_cond(category == "Quantitative Finance", category = "Economics") %>%
+  
+  # adjustments to socarxiv
+  filter(subcategory != "Social and Behavioral Sciences") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Science and Technology Studies",
+    "Environmental Studies",
+    "International and Area Studies",
+    "Leisure Studies",
+    "Organization Development",
+    "Leadership Studies"
+    ), subcategory = "Other Social and Behavioral Sciences") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Library and Information Science",
+    "Linguistics"
+    ), subcategory = "Arts and Humanities") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Urban Studies and Planning",
+    "Social Statistics"
+    ), subcategory = "Sociology") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Social Work",
+    "Legal Studies"
+    ), subcategory = "Law") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Public Affairs, Public Policy and Public Administration"
+    ), subcategory = "Political Science") %>%
+  mutate_cond(repository == "socarxiv" & subcategory %in% c(
+    "Agricultural and Resource Economics"
+    ), subcategory = "Economics") %>%
+  mutate_cond(id %in% filter(
+    ., repository == "socarxiv" & subcategory == "Psychology")$id,
+    category = "Psychology") %>%
+  filter(subcategory != "Psychology") %>%
+  na.omit() %>%
+  distinct() %>%
+  
+  # get just main categories with more than 100 papers for socarxiv & psyarxiv
+  filter((!repository %in% c("socarxiv", "psyarxiv")) | subcategory %in% unlist(
+    lapply(c("socarxiv", "psyarxiv"), get_main, .)))
+
+articles %>%
+  group_by(category) %>%
+  summarise(subcategories=length(unique(subcategory)), n=n())
+```
+
+```{r, message=FALSE}
+text <- readr::read_csv(get_file("text.csv")) %>%
+  select(id, title) %>%
+  collect() %>%
+  mutate(covidpaper = grepl("covid-19", title, ignore.case=TRUE) |
+           grepl("sars-cov-2", title, ignore.case=TRUE) |
+           grepl("coronavirus", title, ignore.case=TRUE))
+```
+
+```{r, message=FALSE}
+authors <- readr::read_csv(get_file("authors.csv")) %>%
+  distinct() %>%
+  collect() %>%
+  mutate(across(probability, as.numeric)) %>%
+  mutate(across(alphabetical_ordered, as.logical)) %>%
+  mutate_cond(is.na(alphabetical_ordered), alphabetical_ordered=TRUE)
+```
+
+## Feature engineering
+
+```{r}
+merge_info <- function(.data) .data %>%
+  left_join(articles, by="id") %>%
+  left_join(text[, c("id", "covidpaper")], by="id") %>%
+  distinct() %>%
+  na.omit() %>%
+  mutate_cond(year < 2020, covidpaper = FALSE) %>%
+  group_by(subcategory) %>%
+  filter(min(year) < 2020) %>%
+  ungroup()
+
+# features all
+df.id <- authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  group_by(id) %>%
+  summarise(n_male = sum(gender == "male", na.rm=TRUE),
+            n_female = sum(gender == "female", na.rm=TRUE),
+            n_na = sum(is.na(gender)),
+            total = n_male + n_female, .groups="drop") %>%
+  merge_info() %>%
+  # remove papers with more than 25% of authors with missing gender
+  filter(n_na < 0.25 * (n_na + n_male + n_female)) %>%
+  # remove observations with less than 30 people per month
+  group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
+  filter(sum(total) > 30) %>%
+  ungroup()
+df.all <- df.id %>%
+  group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
+  summarise(p_male = sum(n_male) / sum(total),
+            total = sum(total), .groups="drop")
+
+summarise_solo <- function(.data) .data %>%
+  group_by(repository, category, subcategory, covidpaper, lockdown, yearmon) %>%
+  summarise(n_male = sum(gender == "male", na.rm=TRUE),
+            n_female = sum(gender == "female", na.rm=TRUE),
+            total = n_male + n_female,
+            p_male = n_male / total, .groups="drop")
+
+# features first
+df.first <- authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  summarise_solo()
+
+# features last
+df.last <- authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "last") %>%
+  merge_info() %>%
+  summarise_solo()
+
+# features single
+df.single <- authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(rank == "single") %>%
+  merge_info() %>%
+  summarise_solo()
+```
+
+# Descriptive
+
+## Data after pre-processing
+
+### Number of unique papers
+
+```{r}
+articles %>%
+  select(id) %>%
+  distinct() %>%
+  count()
+```
+
+### Number of subcategories per category
+
+```{r}
+articles %>%
+  select(category, subcategory) %>%
+  distinct() %>%
+  count(category)
+```
+
+### Number of papers per category
+
+```{r}
+articles %>%
+  select(category, id) %>%
+  distinct() %>%
+  count(category)
+```
+
+## Analysis of missings
+
+### Missing authors
+
+```{r}
+authors %>%
+  select(-id) %>%
+  distinct() %>%
+  summarise(
+    missing = sum(is.na(probability)) / n(),
+    discarded = sum(!is.na(probability) & (probability<0.95 | count<10)) / n(),
+    total = n()
+  )
+```
+
+### Missing authors per year
+
+```{r}
+articles %>%
+  select(id, year) %>%
+  distinct() %>%
+  right_join(authors) %>%
+  group_by(year) %>%
+  summarise(
+    missing = sum(is.na(probability)) / n(),
+    discarded = sum(!is.na(probability) & (probability<0.95 | count<10)) / n(),
+    total = n()
+  ) %>%
+  na.omit()
+```
+
+## Preprints considered per year and model
+
+### All authors
+
+```{r}
+pp.all <- articles %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  group_by(id) %>%
+  summarise(n_male = sum(gender == "male", na.rm=TRUE),
+            n_female = sum(gender == "female", na.rm=TRUE),
+            n_na = sum(is.na(gender)),
+            total = n_male + n_female, .groups="drop") %>%
+  merge_info() %>%
+  # remove papers with more than 25% of authors with missing gender
+  filter(n_na < 0.25 * (n_na + n_male + n_female)) %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.all$n)
+```
+
+### First authors
+
+```{r}
+pp.first <- authors %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "first") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.first$n)
+```
+
+### Last authors
+
+```{r}
+pp.last <- authors %>%
+  filter(!alphabetical_ordered & rank == "last") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(!alphabetical_ordered & rank == "last") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.last$n)
+```
+
+### Single authors
+
+```{r}
+pp.single <- authors %>%
+  filter(rank == "single") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year)
+authors %>%
+  filter(probability >= 0.95 & count >= 10) %>%
+  filter(rank == "single") %>%
+  merge_info() %>%
+  select(id, year) %>%
+  distinct() %>%
+  count(year) %>%
+  mutate(prop = n / pp.single$n)
+```
+
+## Evolution per category over time
+
+### Number of papers per month
+
+```{r}
+library(ggplot2)
+theme_set(theme_bw())
+
+df.plot.papers <- df.id %>%
+  select(yearmon, category, id) %>%
+  distinct() %>%
+  count(yearmon, category)
+df.plot.papers.all <- df.plot.papers %>%
+  group_by(yearmon) %>%
+  summarise(n = sum(n), .groups="drop") %>%
+  mutate(category="(all)")
+
+ggplot(df.plot.papers) +
+  aes(yearmon+2017, n) + facet_wrap(~category, scales="free_y") +
+  geom_col(data=df.plot.papers.all) +
+  geom_smooth(data=df.plot.papers.all) +
+  geom_col() + geom_smooth() +
+  zoo::scale_x_yearmon(format="%Y") +
+  labs(y="Number of papers per month", x=NULL)
+```
+
+### Number of authors per month
+
+```{r}
+df.plot.authors <- df.id %>%
+  select(yearmon, category, id, total) %>%
+  distinct() %>%
+  group_by(yearmon, category) %>%
+  summarise(n = sum(total), .groups="drop")
+df.plot.authors.all <- df.plot.authors %>%
+  group_by(yearmon) %>%
+  summarise(n = sum(n), .groups="drop") %>%
+  mutate(category="(all)")
+
+ggplot(df.plot.authors) +
+  aes(yearmon+2017, n) + facet_wrap(~category, scales="free_y") +
+  geom_col(data=df.plot.authors.all) +
+  geom_smooth(data=df.plot.authors.all) +
+  geom_col() + geom_smooth() +
+  zoo::scale_x_yearmon(format="%Y") +
+  labs(y="Number of authors per month", x=NULL)
+```
+
+### Proportion of males per month
+
+```{r}
+df.plot.p_male <- df.id %>%
+  select(yearmon, category, id, n_male, total) %>%
+  distinct() %>%
+  group_by(yearmon, category) %>%
+  summarise(p_male = sum(n_male) / sum(total), .groups="drop")
+df.plot.p_male.all <- df.id %>%
+  group_by(yearmon) %>%
+  summarise(p_male = sum(n_male) / sum(total), .groups="drop") %>%
+  mutate(category="(all)")
+
+ggplot(df.plot.p_male) +
+  aes(yearmon+2017, p_male) + facet_wrap(~category) +
+  geom_point(data=df.plot.p_male.all) +
+  geom_smooth(method="gam", data=df.plot.p_male.all) +
+  geom_point() + geom_smooth(method="gam") +
+  zoo::scale_x_yearmon(format="%Y") +
+  labs(y="Proportion of male authors", x=NULL)
+```
+
+# Modelling
+
+## Simple model
+
+```{r}
+model.glm <- p_male ~ yearmon + lockdown + covidpaper
+fit.glm <- glm(model.glm, df.all, family=binomial, weights=total)
+summary(fit.glm)
+```
+
+```{r}
+model_performance(fit.glm)
+performance::check_model(fit.glm)
+```
+
+## Hierarchical model
+
+```{r}
+library(lme4)
+
+model <- p_male ~ yearmon + lockdown + covidpaper + (1 | category/subcategory)
+fit.all <- glmer(model, df.all, family=binomial, weights=total)
+summary(fit.all)
+```
+
+```{r}
+model_performance(fit.all)
+performance::check_model(fit.all)
+```
+```{r}
+df.re.category <- sjPlot::get_model_data(fit.all, "re")[[2]] %>%
+  mutate(group = ifelse(conf.low < 1 & conf.high > 1, NA, group)) %>%
+  mutate(term = forcats::fct_reorder(term, estimate))
+
+ggplot(df.re.category) +
+  aes(estimate, term, xmin=conf.low, xmax=conf.high, color=group) +
+  geom_vline(xintercept=1, color="black", linetype="dashed") +
+  geom_errorbarh(height=0, size=1) + geom_point(size=2) +
+  scale_x_log10(breaks=c(0.2, 0.5, 1, 2, 5)) +
+  scale_color_manual(
+    breaks=c("pos", "neg"), values=c("blue", "red"),
+    na.value=grDevices::adjustcolor("grey50", 0.5)) +
+  labs(y=NULL, x="Odds ratio", title="Random effect: category") +
+  theme(legend.position="none")
+```
+
+```{r, fig.asp=4}
+df.re.subcategory <- sjPlot::get_model_data(fit.all, "re")[[1]] %>%
+  mutate(group = ifelse(conf.low < 1 & conf.high > 1, NA, group)) %>%
+  mutate(facet = sapply(strsplit(as.character(term), ":"), tail, 1)) %>%
+  mutate(term = forcats::fct_reorder(term, estimate))
+
+ggplot(df.re.subcategory) +
+  aes(estimate, term, xmin=conf.low, xmax=conf.high, color=group) +
+  facet_grid("facet", scales="free_y", space="free_y") +
+  geom_vline(xintercept=1, color="black", linetype="dashed") +
+  geom_errorbarh(height=0, size=1) + geom_point(size=2) +
+  scale_x_log10(breaks=c(0.2, 0.5, 1, 2, 5)) +
+  scale_color_manual(
+    breaks=c("pos", "neg"), values=c("blue", "red"),
+    na.value=grDevices::adjustcolor("grey50", 0.5)) +
+  labs(y=NULL, x="Odds ratio", title="Random effect: subcategory") +
+  theme(legend.position="none")
+```
+
+## All together
+
+```{r}
+fit <- list(
+  glm = fit.glm,
+  all = fit.all,
+  first = glmer(model, df.first, family=binomial, weights=total),
+  last = glmer(model, df.last, family=binomial, weights=total),
+  single = glmer(model, df.single, family=binomial, weights=total)
+)
+
+df.terms <- lapply(fit, sjPlot::get_model_data, "est") %>%
+  bind_rows(.id="fit") %>%
+  mutate(type = ifelse(fit=="glm", "GLM", "GLMM")) %>%
+  mutate(fit = ifelse(fit=="glm", "all", fit)) %>%
+  mutate(fit = forcats::fct_inorder(fit)) %>%
+  mutate(type = ifelse(p.value >= 0.05, NA, type))
+
+levels(df.terms$term) <- c("COVID paper", "lockdown", "year")
+```
+
+```{r, results='asis'}
+stargazer::stargazer(fit, type="html")
+```
+
+```{r, fig.asp=1}
+ggplot(df.terms) +
+  aes(estimate, term, xmin=conf.low, xmax=conf.high, color=type) +
+  facet_grid("fit", scales="free_y", space="free_y") +
+  geom_vline(xintercept=1, color="black", linetype="dashed") +
+  geom_errorbarh(height=0, size=1) + geom_point(size=2) +
+  ggrepel::geom_text_repel(
+    aes(label=p.label), nudge_y=0.3, nudge_x=0.01, segment.size=0, show.legend=FALSE) +
+  scale_x_log10(breaks=c(0.2, 0.5, 1, 2, 5)) +
+  scale_color_manual(
+    breaks=c("GLM", "GLMM"), values=c("red", "black"),
+    na.value=grDevices::adjustcolor("grey50", 0.5)) +
+  labs(y=NULL, x="Odds ratio", color="Model") +
+  theme(legend.position=c(.99, .99), legend.justification=c(1, 1)) +
+  theme(legend.background=element_rect(fill="#ffffff88"))
+```
